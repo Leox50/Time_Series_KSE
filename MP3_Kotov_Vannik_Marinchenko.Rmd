@@ -1,0 +1,655 @@
+---
+title: "MP3"
+author: "Volodymyr Kotov, Milan Vannik, Serhii Marinchenko"
+date: "2023-02-04"
+output: html_document
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(xts)
+library(tseries)
+library(foreign)
+library(tsibble)
+library(tsibbledata)
+library(feasts)
+library(fable)
+library(urca)
+library(dplyr)
+library(astsa)
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(zoo)
+library(rugarch)
+```
+
+```{r, warning=FALSE, message=FALSE}
+setwd("~/Desktop/KSE/Econometrics III")
+data_1 <- read_excel("CMO-Historical-Data-Monthly.xlsx", sheet = "Monthly Prices", skip = 4) %>%
+  mutate(
+    `Coal, Australian` = as.numeric(`Coal, Australian **`),
+    `Coal, South African` = as.numeric(`Coal, South African **`)
+  ) %>% 
+  select(`Coal, Australian`, `Coal, South African`) %>% 
+  filter( !is.na(`Coal, South African`)) %>% 
+  mutate(date = seq(as.Date("1984-01-01"), length = 468, by = "month"))
+data_1 <- data_1 %>% 
+  mutate(Date = yearmonth(date))
+
+data_1_tsb <- data_1 %>% 
+  as_tsibble(index = Date) 
+
+#lets separate 10 observations
+
+data_2_tsb <- data_1_tsb[1:(nrow(data_1_tsb)-10),]
+
+data_au_ts <- data_2_tsb %>% 
+  select(., `Coal, Australian`, Date)
+
+data_saf_ts <- data_2_tsb %>% 
+  select(., `Coal, South African`, Date)
+```
+
+  
+###  Model fit
+
+```{r, warning=FALSE, message=FALSE}
+fit_au <- data_au_ts %>% 
+  model(arima110_au = ARIMA(`Coal, Australian` ~ pdq(1,1,0)+ PDQ(0,0,0)), 
+        arima210_au = ARIMA(`Coal, Australian` ~ pdq(2,1,0)+ PDQ(0,0,0)),
+        arima111_au = ARIMA(`Coal, Australian` ~ pdq(1,1,1)+ PDQ(0,0,0)),
+        arima511_au = ARIMA(`Coal, Australian` ~ PDQ(0,0,0), stepwise = FALSE, greedy = FALSE))
+
+glance(fit_au)
+
+data_3_tsb <- data_1_tsb[(nrow(data_1_tsb)-9):nrow(data_1_tsb),]
+```
+  
+### Holdback forecast evaluation  
+  
+```{r, warning=FALSE, message=FALSE}
+forecast_h10 <- fit_au %>% fabletools::forecast(h = 10)
+
+fabletools::accuracy(forecast_h10, data_1_tsb) %>% 
+  select(.model | ME:RMSSE)
+```
+  
+Using holdback data of 10 observations, we can see that the model with minimized loss is arima111.  
+
+```{r, warning=FALSE, message=FALSE}
+data_test_au <- data_3_tsb %>% 
+  select(., `Coal, Australian`, Date)
+
+data_au_ts_plot <- data_au_ts %>% 
+  filter_index("2018 Mar " ~ "2022 Feb")
+
+autoplot(data_au_ts_plot) + autolayer(forecast_h10) + autolayer(data_test_au)   
+```
+  
+### Calculate bias  
+
+```{r, warning=FALSE, message=FALSE}
+Volat_au_110 <- data_3_tsb$`Coal, Australian` - forecast_h10$.mean[1:10]
+Volat_au_210 <- data_3_tsb$`Coal, Australian` - forecast_h10$.mean[11:20]
+Volat_au_111 <- data_3_tsb$`Coal, Australian` - forecast_h10$.mean[21:30]
+Volat_au_511 <- data_3_tsb$`Coal, Australian` - forecast_h10$.mean[31:40]
+
+print(paste("The estimate of ARIMA(1, 1, 0) bias is", as.character(mean(Volat_au_110))))
+print(paste("The estimate of ARIMA(2, 1, 0) bias is", as.character(mean(Volat_au_210))))
+print(paste("The estimate of ARIMA(1, 1, 1) bias is", as.character(mean(Volat_au_111))))
+print(paste("The estimate of ARIMA(5, 1, 1) bias is", as.character(mean(Volat_au_511))))
+```
+  
+```{r, warning=FALSE, message=FALSE}
+fit_resid_arima110 <- lm(Volat_au_110 ~ forecast_h10$.mean[1:10])
+fit_resid_arima210 <- lm(Volat_au_210 ~ forecast_h10$.mean[11:20])
+fit_resid_arima111 <- lm(Volat_au_111 ~ forecast_h10$.mean[21:30])
+fit_resid_arima511 <- lm(Volat_au_511 ~ forecast_h10$.mean[31:40])
+
+summary(fit_resid_arima110)
+summary(fit_resid_arima210)
+summary(fit_resid_arima111)
+summary(fit_resid_arima511)
+```
+When regressing fitted values onto errors of the model, both the intercept and the slope have quite low p-values. Conclusion: the model biased.
+  
+### Forecast for 2023
+  
+```{r, warning=FALSE, message=FALSE}
+data_au_ts_fore2023 <- data_1_tsb %>% 
+  select(., `Coal, Australian`, Date)
+
+fit_au_forecast <- data_au_ts_fore2023 %>% 
+  model(
+    arima111_au = ARIMA(`Coal, Australian` ~ pdq(1,1,1)+ PDQ(0,0,0))
+  )
+
+
+forecast_au_h12 <- fit_au_forecast %>%
+  select(arima111_au) %>% 
+  fabletools::forecast(h = 12)
+
+forecast_au_h12 %>% autoplot() + autolayer(data_au_ts_fore2023[350:nrow(data_au_ts_fore2023),])
+```
+  
+```{r, warning=FALSE, message=FALSE}
+forecast_au_h12 
+```
+  
+The price on Australian coal forecasted by the experts for 2023-01-01 is 317.99, whereas the price forecasted by our model is 233.85. The prices are inconsistent with each other. The reason is the caused by war structural break in our data that occurred in 2022 and is not included to the training sample.
+
+### Residuals diagnostics
+
+```{r, warning=FALSE, message=FALSE}
+Box.test(Volat_au_111, lag = 7)
+```
+
+Cannot reject H0 of independence in residuals. 
+
+```{r, warning=FALSE, message=FALSE}
+acf2(Volat_au_111)
+```
+
+
+### The same for South African coal
+
+```{r, warning=FALSE, message=FALSE}
+fit_saf <- data_saf_ts %>% 
+  model(arima110_saf = ARIMA(`Coal, South African` ~ pdq(1,1,0)+ PDQ(0,0,0)), 
+        arima210_saf = ARIMA(`Coal, South African` ~ pdq(2,1,0)+ PDQ(0,0,0)),
+        arima111_saf = ARIMA(`Coal, South African` ~ pdq(1,1,1)+ PDQ(0,0,0)),
+        arima511_saf = ARIMA(`Coal, South African` ~ PDQ(0,0,0), stepwise = FALSE, greedy = FALSE))
+```
+
+```{r, warning=FALSE, message=FALSE}
+forecast_saf_h10 <- fit_saf %>% fabletools::forecast(h = 10)
+
+fabletools::accuracy(forecast_saf_h10, data_1_tsb) %>% 
+  select(.model | ME:RMSSE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data_test_saf <- data_3_tsb %>% 
+  select(., `Coal, Australian`, Date)
+
+data_saf_ts_plot <- data_saf_ts %>% 
+  filter_index("2018 Mar " ~ "2022 Feb")
+
+autoplot(data_saf_ts_plot) + autolayer(forecast_h10) + autolayer(data_test_saf)  
+```
+
+```{r}
+Volat_saf_110 <- data_3_tsb$`Coal, South African` - forecast_saf_h10$.mean[1:10]
+Volat_saf_210 <- data_3_tsb$`Coal, South African` - forecast_saf_h10$.mean[11:20]
+Volat_saf_111 <- data_3_tsb$`Coal, South African` - forecast_saf_h10$.mean[21:30]
+Volat_saf_511 <- data_3_tsb$`Coal, South African` - forecast_saf_h10$.mean[31:40]
+
+print(paste("The estimate of ARIMA(1, 1, 0) bias is", as.character(mean(Volat_saf_110))))
+print(paste("The estimate of ARIMA(2, 1, 0) bias is", as.character(mean(Volat_saf_210))))
+print(paste("The estimate of ARIMA(1, 1, 1) bias is", as.character(mean(Volat_saf_111))))
+print(paste("The estimate of ARIMA(5, 1, 1) bias is", as.character(mean(Volat_saf_511))))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+fit_resid_arima110_saf <- lm(Volat_saf_110 ~ forecast_saf_h10$.mean[1:10])
+fit_resid_arima210_saf <- lm(Volat_saf_210 ~ forecast_saf_h10$.mean[11:20])
+fit_resid_arima111_saf <- lm(Volat_saf_111 ~ forecast_saf_h10$.mean[21:30])
+fit_resid_arima511_saf <- lm(Volat_saf_511 ~ forecast_saf_h10$.mean[31:40])
+
+summary(fit_resid_arima110_saf)
+summary(fit_resid_arima210_saf)
+summary(fit_resid_arima111_saf)
+summary(fit_resid_arima511_saf)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Box.test(Volat_saf$.resid, lag = 7)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data_saf_ts_fore2023 <- data_1_tsb %>% 
+  select(., `Coal, South African`, Date)
+
+fit_saf_forecast <- data_saf_ts_fore2023 %>% 
+  model(
+    arima111_au = ARIMA(`Coal, South African` ~ pdq(1,1,1)+ PDQ(0,0,0))
+  )
+
+
+forecast_saf_h12 <- fit_saf_forecast %>%
+  select(arima111_au) %>% 
+  fabletools::forecast(h = 12)
+
+forecast_saf_h12 %>% autoplot() + autolayer(data_saf_ts_fore2023[350:nrow(data_saf_ts_fore2023),])
+
+```
+
+
+### Experts forecast:
+
+The last World Bank forecast of commodity market prices was made at October 2022. The price on Australian coal forecasted by the experts in October 2022 for 2023 is USD 240, whereas the price forecasted by our model is USD `r forecast_au_h12$.mean %>% mean`. The prices are inconsistent with each other. The reason is the caused by war structural break in our data that occurred in November 2022 and was not included to the training sample of experts at World Bank who did the forecast in October 2022 (as they used data before Feb 2022). However, the actual price for Australian coal was USD 317.99 in Jan 2023, and the forecast for Jan 2023 is 380.24. Conclusion: including all data up to end of 2022 increases accuracy of the model but still there is difference of `r 317.99 - 380.24` between actual and forecasted value for Jan 2023.
+
+# Part II
+
+Table of contents for the second part:
+- Check for ARCH effect in our data
+  - plot graphs of ACF, PACF, residuals and squared residuals
+- Select the needed parameters for our model (both for AU and SAF)
+- Complete tests to see of our models are satisfactory
+- Recomplete forecast and plot results
+
+### Check for ARCH effect in our data:
+
+As well as we selected arima111 for both categories of prices, we will proceed 
+with this specification. Just for the report not to take 1000+ lines of codes, we will stick only to a AU coal prices keeping in mind that the same procedure could be done for SAF prices on coal as well.
+However, as well as we cannot get residuals of forecasted models, we will use our models on our whole data
+
+For AU:
+
+Lets check that visually
+
+Model creation:
+```{r warning=FALSE, message=FALSE}
+
+arima_au_111 <- arima(data_au_ts_fore2023$`Coal, Australian`, order = c(1,1,1))
+
+resid_au <- arima_au_111$residuals
+resid_au_sq <- resid_au^2
+
+```
+
+ACF:
+```{r warning=FALSE, message=FALSE}
+
+ggAcf(resid_au)
+
+```
+
+PACF:
+
+```{r warning=FALSE, message=FALSE}
+
+ggPacf(resid_au)
+
+```
+
+Even if that is negotiable somehow, the next graphs will deal with
+all the debates.
+
+
+ACF for squared residuals:
+
+```{r}
+ggAcf(resid_au_sq)
+
+```
+
+
+PACF for squared residuals:
+
+```{r}
+
+ggPacf(resid_au_sq)
+
+```
+As we can see, there is an autocorrelation function on acf and pacf
+that we can get from residuals squared.
+
+One more proof:
+
+```{r}
+
+resid_au %>% autoplot()
+
+```
+
+
+For sure ARCH exists. Lets prove that formally.
+
+```{r}
+
+lag_au <- as.integer(round(log(nrow(data_au_ts_fore2023)),0))
+FinTS::ArchTest(residuals(arima_au_111), lags=lag_au)
+
+```
+
+**Result:** low p-value. ARCH exists. Lets deal with it.
+
+We will try to evaluate what we have on the following models:
+GARCH(1,1), ARCH(2), ARCH(1). But, as stated by our TA and by the same statement from the book, GARCH(1,1) actually can catch high autoregressive orders, so we will not use any ARCH(3)+.
+
+As well as GARCH model do not work with differenced models, we need
+to settle our data already differenced.
+
+```{r}
+
+data_au_ts_fore2023_copy <- data_au_ts_fore2023
+data_au_ts_fore2023_copy$au_price_diff <- NA
+view(data_au_ts_fore2023_copy)
+
+for (i in (2:(nrow(data_au_ts_fore2023_copy)))) {
+  data_au_ts_fore2023_copy$au_price_diff[i] <- data_au_ts_fore2023_copy$`Coal, Australian`[i] - data_au_ts_fore2023_copy$`Coal, Australian`[i-1]
+}
+
+data_au_ts_fore2023_copy$au_price_diff[1] <- 0
+
+data_au_test <- data_au_ts_fore2023_copy[1:(nrow(data_au_ts_fore2023_copy)-10),]
+data_au_check <- data_au_ts_fore2023_copy[(nrow(data_au_ts_fore2023_copy)-9):nrow(data_au_ts_fore2023_copy),]
+
+```
+
+
+### GARCH(1,1)
+
+```{r}
+
+garch1_1Spec_au = ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,1)),
+              mean.model=list(armaOrder=c(1,1),
+              include.mean=T))
+
+garch1_1Fit_au <- ugarchfit(spec = garch1_1Spec_au, data = data_au_test$au_price_diff)
+print(garch1_1Fit_au)
+
+```
+
+**Ljung-Box Test on Standardized Squared Residuals**
+-------------
+**lags that were used:** 1, 5, 9
+**result:** on all of the lags above the p-value is to high, what does not allows us to reject 
+the null hypothesis that states that we have no correlation
+
+**Ljung-Box Test on Standardized Residuals**
+-------------
+**lags that were used:** 1,5,9
+**result:** No serial correlation cannot be stated because of low p-value on all of the lags
+
+**ARCH test**
+-------------
+**lags that were used:** 3,5,7
+**result:** on all of the lags above, the p-value is too high, so we cannot reject H0 that states that we have no ARCH effect
+
+**AIC:** 4.8277
+**BIC:** 4.8818
+
+### ARCH(1)
+
+```{r}
+
+arch1Spec_au = ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,0)),
+              mean.model=list(armaOrder=c(1,1),
+              include.mean=T))
+
+arch1Fit_au <- ugarchfit(spec = arch1Spec_au, data = data_au_test$au_price_diff)
+print(arch1Fit_au)
+
+```
+
+**Ljung-Box Test on Standardized Squared Residuals**
+-------------
+**lags that were used:** 1, 2, 5
+**result:** No serial correlation can be stated because of high p-value on first two lags, but it is present on the fifth lag on the 10% s.l.
+
+**Ljung-Box Test on Standardized Residuals**
+-------------
+**lags that were used:** 1,5,9
+**result:** No serial correlation on the first and the ninth lag. However, it is present on the fifth lag.
+
+**ARCH test**
+-------------
+**lags that were used:** 2,4,6
+**result:** on the second lag the p-value is high enough not to reject H0. On the fourth and the sixth lags, the p-value is too low, so we **can reject H0** that states that we have no ARCH effect
+
+**AIC:** 5.4299
+**BIC:** 5.4749
+
+### ARCH(2)
+
+```{r}
+
+arch2Spec_au = ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(2,0)),
+              mean.model=list(armaOrder=c(1,1),
+              include.mean=T))
+
+arch2Fit_au <- ugarchfit(spec = arch2Spec_au, data = data_au_test$au_price_diff)
+print(arch2Fit_au)
+
+```
+
+**Ljung-Box Test on Standardized Squared Residuals**
+-------------
+**lags that were used:** 1, 5, 9
+**result:** No serial correlation can be stated because of low p-value on the all of the lags.
+
+**Ljung-Box Test on Standardized Residuals**
+-------------
+**lags that were used:** 1,5,9
+**result:** No serial correlation cannot be stated because of small p-value on all of the lags
+
+**ARCH test**
+-------------
+**lags that were used:** 3,5,7
+**result:** on all of the lags above, the p-value is too low, so we **can reject H0** that states that we have no ARCH effect
+
+**AIC:** 5.1005
+**BIC:** 5.1545
+
+### **Conclusion**
+
+We will proceed with the only GARCH(1,1) as it is the only one that has no ARCH effect byt the test results and has the lowest AIC and BIC criteria.
+
+### Remodeling with GARCH(1,1):
+
+```{r}
+
+# Forecasting
+
+forecast_garch_au <- ugarchboot(garch1_1Fit_au, method = c("Partial","Full")[1],
+                            n.ahead = 10, n.bootpred = 1000, n.bootfit = 1000)
+
+f_garch_au <- forecast_garch_au@forc@forecast$seriesFor 
+
+sigma_au <- forecast_garch_au@forc@forecast$sigmaFor[1]
+high_au <- f_garch_au + 1.96*sigma_au
+low_au <- f_garch_au - 1.96*sigma_au
+
+```
+
+For a beautiful graph, lets create a dataframe:
+
+```{r}
+data_au_ts_fore2023_copy[(nrow(data_au_ts_fore2023_copy)-10),]
+x <- seq(as.Date("2022-03-01"), as.Date("2022-12-31"), by = "1 month")
+Date <- yearmonth(x)
+au_price_diff <- f_garch_au 
+
+data_for_rbind_au <- as.data.frame(f_garch_au,Date)
+
+data_for_rbind_au2 <- data_au_ts_fore2023_copy[,c("au_price_diff","Date")]
+
+ggplot(data_for_rbind_au2, aes(x=Date,y=au_price_diff)) +
+  geom_line()
+
+```
+ 
+It was a plot of our 10 in-sample observations. But we should better stick not to differenced value, so we have to return it the real values:
+
+```{r}
+
+data_au_test[(nrow(data_au_test)-1):nrow(data_au_test),]
+
+data_model_au_wo_diff <- data_for_rbind_au
+data_model_au_wo_diff
+
+data_model_au_wo_diff <- data_model_au_wo_diff %>% 
+  rename(., 'au_price_no_diff' = `1971-04-04 03:00:00`)
+
+data_model_au_wo_diff$au_price_no_diff[1] <- data_model_au_wo_diff$au_price_no_diff[1] + data_au_test$`Coal, Australian`[nrow(data_au_test)]
+
+for (t in (2:10)) {
+  data_model_au_wo_diff$au_price_no_diff[t] = data_model_au_wo_diff$au_price_no_diff[t] + data_model_au_wo_diff$au_price_no_diff[t-1]
+}
+
+data_model_au_wo_diff$Date <- rownames(data_model_au_wo_diff)
+
+data_au_test_1 <- data_au_test[,c('Coal, Australian',"Date")]
+
+data_model_au_wo_diff <- data_model_au_wo_diff %>% 
+  mutate(Date = yearmonth(Date))
+
+df_test <- dplyr::bind_rows(data_au_test_1,data_model_au_wo_diff)
+
+typeof(data_au_test_1)
+typeof(data_model_au_wo_diff)
+
+low_au_check <- data_model_au_wo_diff$au_price_no_diff - 1.96*forecast_garch_au@fsigma[1]
+high_au_check <- data_model_au_wo_diff$au_price_no_diff + 1.96*forecast_garch_au@fsigma[1]
+
+date <- rownames(data_model_au_wo_diff)
+bands <- data.frame(date,low_au_check,high_au_check)
+
+bands <- bands %>% 
+  mutate(Date = yearmonth(date))
+
+plot(x=data_au_ts_fore2023_copy$Date[308:468],y=data_au_ts_fore2023_copy$`Coal, Australian`[308:468],type='l', xlab = "Time", ylab = "Price")
+lines(x=data_model_au_wo_diff$Date,y=data_model_au_wo_diff$au_price_no_diff,type='l',col='red')
+lines(x=bands$Date, y=bands$low_au_check,type='l',col='blue', lty=2)
+lines(x=bands$Date, y=bands$high_au_check,type='l',col='blue', lty=2)
+
+```
+
+
+Lets compare visually to what we had before:
+
+```{r}
+
+autoplot(data_au_ts_plot) + autolayer(forecast_h10) + autolayer(data_test_au)   
+
+```
+
+Just visually, there is almost no difference between the variables, so we need to check manually with bias calculation and loss functions what is better.
+
+Bias:
+```{r}
+
+#what we had before:
+summary(fit_resid_arima111)
+#the model was biased. let's check this one
+volat_au_garch <- data_3_tsb$`Coal, South African` - data_model_au_wo_diff$au_price_no_diff
+
+#let's check its estimate
+mean(volat_au_garch)
+
+```
+
+Now, lets find the bias itself:
+
+```{r}
+
+bias_au <- lm(volat_au_garch ~ data_model_au_wo_diff$au_price_no_diff)
+summary(bias_au)
+
+```
+
+Congratulations!
+Our model is not biased anymore as well as the p-value of our coefficients is too high what makes them insignificant.
+
+Other parameters:
+
+```{r}
+
+RMSE_garch <- (sum((volat_au_garch)^2/length((volat_au_garch)))^(1/2))
+RMSE_garch
+
+MAE_garch <- sum(abs(volat_au_garch))/length(volat_au_garch)
+MAE_garch
+
+MAPE_garch <- sum(abs(volat_au_garch/data_model_au_wo_diff$au_price_no_diff))/length(data_model_au_wo_diff$au_price_no_diff)
+MAPE_garch*100
+
+```
+
+lets see what we had:
+```{r}
+
+fabletools::accuracy(forecast_h10, data_1_tsb) %>% 
+  select(.model | RMSE:MAPE)
+
+```
+**Comments:**
+
+Even though MAPE is a bit higher for GARCH(1,1) model, Bias, RMSE and MAE are significantly lower, what makes us choose the GARCH model.
+
+### Forecast with GARCH.
+
+```{r}
+
+garch_for2023_Spec_au = ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,1)),
+              mean.model=list(armaOrder=c(1,1),
+              include.mean=T))
+
+garch_for2023_Fit_au <- ugarchfit(spec = garch_for2023_Spec_au, data = data_au_ts_fore2023_copy$au_price_diff)
+
+forecast2023_garch_au <- ugarchboot(garch_for2023_Fit_au, method = c("Partial","Full")[1],
+                            n.ahead = 12, n.bootpred = 1000, n.bootfit = 1000)
+
+f_garch_au_2023 <- forecast2023_garch_au@forc@forecast$seriesFor 
+
+sigma_au_f <- forecast2023_garch_au@forc@forecast$sigmaFor[1]
+high_au <- f_garch_au_2023 + 1.96*sigma_au
+low_au <- f_garch_au_2023 - 1.96*sigma_au
+
+```
+
+Lets now get it back to the regular values form:
+
+```{r}
+
+data_au_ts_fore2023_copy[(nrow(data_au_ts_fore2023_copy)-1):nrow(data_au_ts_fore2023_copy),]
+
+data_model_au_wo_diff2023 <- as.data.frame(f_garch_au_2023)
+
+data_model_au_wo_diff2023 <- data_model_au_wo_diff2023 %>% 
+  rename(., 'au_price_no_diff' = `1971-04-14 03:00:00`)
+
+data_model_au_wo_diff2023$au_price_no_diff[1] <- data_model_au_wo_diff2023$au_price_no_diff[1] + data_au_ts_fore2023_copy$`Coal, Australian`[nrow(data_au_ts_fore2023_copy)]
+
+for (t in (2:12)) {
+  data_model_au_wo_diff2023$au_price_no_diff[t] = data_model_au_wo_diff2023$au_price_no_diff[t] + data_model_au_wo_diff2023$au_price_no_diff[t-1]
+}
+
+x <- seq(as.Date("2023-01-01"), as.Date("2023-12-31"), by = "1 month")
+Date <- yearmonth(x)
+
+data_model_au_wo_diff2023$Date <- Date
+
+```
+
+```{r}
+
+df_test_3 <- data_au_ts_fore2023_copy %>% 
+  rename(., "au_price_no_diff" =`Coal, Australian`)
+
+df_test_3 <- df_test_3[,c("Date","au_price_no_diff")]
+
+df_test_4 <- data_model_au_wo_diff2023[,c("Date","au_price_no_diff")]
+
+df_test_4 <- as.data.frame(df_test_4)
+
+df_test_5 <- bind_rows(df_test_3,df_test_4)
+
+```
+
+```{r}
+
+df_test_5$type <- ifelse(df_test_5$Date %in% Date, 'forecast','regular')
+
+ggplot(df_test_5[(nrow(df_test_5)-50):nrow(df_test_5),], aes(x = Date,y = au_price_no_diff, col=type)) +
+  geom_line() 
+
+```
+
+
+As we can see, the new forecast estimate is `r mean(data_model_au_wo_diff2023$au_price_no_diff)` what is a bit higher than we had without a garch model what is much closer to the forecasted value of 380.24 that is measured my the experts who work in World Bank.
